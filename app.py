@@ -10,18 +10,26 @@ import io
 st.set_page_config(page_title="Gerador de Plano de Carregamento", page_icon="🚛")
 
 st.title("🚛 Gerador Automático de Carregamento")
-st.write("Faça o upload da planilha com os blocos e o sistema calculará a melhor distribuição nos containers de acordo com as regras de peso e medidas.")
+st.write("Faça o upload da planilha com os blocos e o sistema calculará a melhor distribuição nos containers considerando o peso estrutural e o equilíbrio de içamento.")
 
 class Container:
     def __init__(self, id):
         self.id = id
-        self.cols = {0: [], 1: []}
+        self.cols = {0: [], 1: []}  # 0: Lado da Porta (Traseira), 1: Lado Cego (Dianteira)
         
-    def get_weight(self):
+    def get_cargo_weight(self):
         return sum(b['TONS'] for b in self.cols[0]) + sum(b['TONS'] for b in self.cols[1])
         
-    def get_col_weight(self, c):
+    def get_col_cargo_weight(self, c):
         return sum(b['TONS'] for b in self.cols[c])
+        
+    def get_total_col_weight(self, c):
+        # c=0: Lado da porta (~1.19t estrutural) | c=1: Lado cego (~1.01t estrutural)
+        structural_weight = 1.19 if c == 0 else 1.01
+        return self.get_col_cargo_weight(c) + structural_weight
+        
+    def get_total_weight(self):
+        return self.get_cargo_weight() + 2.20  # 2.2t peso total vazio do container
         
     def get_col_height(self, c):
         return sum(b['h_eff'] for b in self.cols[c])
@@ -31,7 +39,7 @@ class Container:
         return max(b['l_eff'] for b in self.cols[c])
         
     def can_add(self, block, c_idx, orient):
-        if self.get_weight() + block['TONS'] > 27.5:
+        if self.get_cargo_weight() + block['TONS'] > 25.3:  # Limite de carga útil (~27.3t total - 2.2t tara)
             return False
             
         if orient == 'C':
@@ -61,7 +69,7 @@ def solve(blocks_data):
     best_solution = None
     best_score = float('inf')
     
-    for attempt in range(5000):
+    for attempt in range(8000):
         containers = [Container(i) for i in range(1, 7)]
         shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-1, 1), reverse=True)
         
@@ -72,10 +80,16 @@ def solve(blocks_data):
                 for c_idx in [0, 1]:
                     for orient in ['C', 'A']:
                         if cont.can_add(b, c_idx, orient):
-                            weight_penalty = cont.get_weight()
+                            # Penalidade de peso total e desequilíbrio entre o lado da porta (0) e o lado cego (1)
+                            t0 = cont.get_total_col_weight(0) + (b['TONS'] if c_idx == 0 else 0)
+                            t1 = cont.get_total_col_weight(1) + (b['TONS'] if c_idx == 1 else 1)
+                            balance_penalty = abs(t0 - t1) * 50  # Forte penalidade para evitar desnível no guindaste
+                            
+                            weight_penalty = cont.get_cargo_weight()
                             new_len = max(cont.get_col_length(c_idx), (b['Comp'] if orient=='C' else b['Alt']))
                             len_penalty = new_len - cont.get_col_length(c_idx)
-                            score = weight_penalty * 10 + len_penalty
+                            
+                            score = weight_penalty * 5 + balance_penalty + len_penalty
                             valid_moves.append((score, cont, c_idx, orient))
             
             if not valid_moves:
@@ -87,10 +101,10 @@ def solve(blocks_data):
             chosen[1].add(b, chosen[2], chosen[3])
             
         if success:
-            weights = [c.get_weight() for c in containers]
-            variance = np.var(weights)
-            if variance < best_score:
-                best_score = variance
+            # Verifica se o desequilíbrio estrutural total em cada container é seguro
+            max_imbalance = max(abs(c.get_total_col_weight(0) - c.get_total_col_weight(1)) for c in containers)
+            if max_imbalance < best_score:
+                best_score = max_imbalance
                 best_solution = deepcopy(containers)
                 
     return best_solution
@@ -104,16 +118,9 @@ def create_excel_report(solution):
     
     row_offset = 2
     for c_idx, cont in enumerate(solution):
-        w0 = cont.get_col_weight(0)
-        w1 = cont.get_col_weight(1)
-        
-        if w0 >= w1:
-            front_col_idx, back_col_idx = 0, 1
-        else:
-            front_col_idx, back_col_idx = 1, 0
-            
-        front_col = sorted(cont.cols[front_col_idx], key=lambda x: x['l_eff'], reverse=True)
-        back_col = sorted(cont.cols[back_col_idx], key=lambda x: x['l_eff'], reverse=True)
+        # Coluna 0: Lado da Porta (Traseira) | Coluna 1: Lado Cego (Dianteira)
+        door_col = sorted(cont.cols[0], key=lambda x: x['l_eff'], reverse=True)
+        blind_col = sorted(cont.cols[1], key=lambda x: x['l_eff'], reverse=True)
         
         ws.merge_cells(start_row=row_offset, start_column=2, end_row=row_offset, end_column=4)
         cell = ws.cell(row=row_offset, column=2, value=f"CONTAINER {cont.id}")
@@ -121,27 +128,31 @@ def create_excel_report(solution):
         cell.alignment = Alignment(horizontal='center')
         
         row_offset += 1
-        max_blocks = max(len(front_col), len(back_col))
+        ws.cell(row=row_offset, column=2, value="Lado Porta").alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=3, value="Lado Cego").alignment = Alignment(horizontal='center')
+        row_offset += 1
         
-        back_orient = back_col[-1]['orient'] if back_col else ""
-        front_orient = front_col[-1]['orient'] if front_col else ""
+        max_blocks = max(len(door_col), len(blind_col))
         
-        ws.cell(row=row_offset, column=2, value=back_orient).alignment = Alignment(horizontal='center')
-        ws.cell(row=row_offset, column=3, value=front_orient).alignment = Alignment(horizontal='center')
+        door_orient = door_col[-1]['orient'] if door_col else ""
+        blind_orient = blind_col[-1]['orient'] if blind_col else ""
+        
+        ws.cell(row=row_offset, column=2, value=door_orient).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=3, value=blind_orient).alignment = Alignment(horizontal='center')
         row_offset += 1
         
         fill = PatternFill(start_color=colors[c_idx % len(colors)], end_color=colors[c_idx % len(colors)], fill_type="solid")
         
         for i in range(max_blocks - 1, -1, -1):
-            if i < len(back_col):
-                b = back_col[i]
+            if i < len(door_col):
+                b = door_col[i]
                 c = ws.cell(row=row_offset, column=2, value=b['Bloco'])
                 c.fill = fill
                 c.border = thick_border
                 c.alignment = Alignment(horizontal='center')
                 
-            if i < len(front_col):
-                b = front_col[i]
+            if i < len(blind_col):
+                b = blind_col[i]
                 c = ws.cell(row=row_offset, column=3, value=b['Bloco'])
                 c.fill = fill
                 c.border = thick_border
@@ -149,19 +160,23 @@ def create_excel_report(solution):
                 
             row_offset += 1
             
-        back_len = max([b['l_eff'] for b in back_col]) if back_col else 0
-        front_len = max([b['l_eff'] for b in front_col]) if front_col else 0
-        back_w = sum([b['TONS'] for b in back_col])
-        front_w = sum([b['TONS'] for b in front_col])
+        door_len = max([b['l_eff'] for b in door_col]) if door_col else 0
+        blind_len = max([b['l_eff'] for b in blind_col]) if blind_col else 0
         
-        ws.cell(row=row_offset, column=2, value=round(back_len, 2)).alignment = Alignment(horizontal='center')
-        ws.cell(row=row_offset, column=3, value=round(front_len, 2)).alignment = Alignment(horizontal='center')
-        ws.cell(row=row_offset, column=4, value=round(back_len + front_len, 2)).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=2, value=round(door_len, 2)).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=3, value=round(blind_len, 2)).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=4, value=round(door_len + blind_len, 2)).alignment = Alignment(horizontal='center')
         row_offset += 1
         
-        ws.cell(row=row_offset, column=2, value=round(back_w, 3)).alignment = Alignment(horizontal='center')
-        ws.cell(row=row_offset, column=3, value=round(front_w, 3)).alignment = Alignment(horizontal='center')
-        ws.cell(row=row_offset, column=4, value=round(back_w + front_w, 3)).alignment = Alignment(horizontal='center')
+        # Pesos de Carga e Pesos Totais (com tara estrutural)
+        door_w = sum([b['TONS'] for b in door_col])
+        blind_w = sum([b['TONS'] for b in blind_col])
+        total_door_w = cont.get_total_col_weight(0)
+        total_blind_w = cont.get_total_col_weight(1)
+        
+        ws.cell(row=row_offset, column=2, value=round(total_door_w, 3)).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=3, value=round(total_blind_w, 3)).alignment = Alignment(horizontal='center')
+        ws.cell(row=row_offset, column=4, value=round(total_door_w + total_blind_w, 3)).alignment = Alignment(horizontal='center')
         row_offset += 3
         
     output = io.BytesIO()
@@ -184,24 +199,24 @@ if uploaded_file is not None:
         st.success(f"Planilha carregada! {len(blocks_data)} blocos encontrados.")
         
         if st.button("Gerar Plano de Carregamento", type="primary"):
-            with st.spinner("Calculando a melhor distribuição (isso pode levar alguns segundos)..."):
+            with st.spinner("Calculando distribuição equilibrada para içamento..."):
                 sol = solve(blocks_data)
                 
             if sol:
                 st.success("Plano gerado com sucesso!")
-                st.subheader("Resumo do Carregamento:")
+                st.subheader("Resumo do Carregamento (Equilibrado para Guindaste):")
                 for c in sol:
-                    st.write(f"**Container {c.id}:** Peso {c.get_weight():.3f} ton | Medida Usada: {c.get_col_length(0)+c.get_col_length(1):.2f} m")
+                    st.write(f"**Container {c.id}:** Peso Total {c.get_total_weight():.3f} ton | Porta: {c.get_total_col_weight(0):.3f}t | Cego: {c.get_total_col_weight(1):.3f}t")
                 
                 excel_data = create_excel_report(sol)
                 st.download_button(
                     label="📥 Baixar Excel do Plano (Para o Pátio)",
                     data=excel_data,
-                    file_name="Plano_Alocacao.xlsx",
+                    file_name="Plano_Alocacao_Equilibrado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Não foi possível encontrar uma combinação.")
+                st.error("Não foi possível encontrar uma combinação dentro dos limites estritos de equilíbrio.")
                 
     except Exception as e:
         st.error(f"Erro ao ler a planilha. Detalhe: {e}")
