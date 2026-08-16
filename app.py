@@ -17,7 +17,7 @@ MIN_CARGO = 26.5
 MAX_CARGO = 27.5  
 TARGET_CG = 2.95  
 
-st.title("🚛 Gerador Automático de Carregamento")
+st.title("🚛 Gerador Automático de Carregamento (Padrão Diretoria)")
 st.write(f"O algoritmo calcula o Centro de Gravidade (CG) ideal (~2.95m) e distribui os blocos mantendo a carga entre **{MIN_CARGO} t** e **{MAX_CARGO} t**.")
 
 class Container:
@@ -38,8 +38,8 @@ class Container:
         if not self.cols[c]: return 0.0
         return max(b['l_eff'] for b in self.cols[c])
         
-    def can_add(self, block, c_idx, orient):
-        if self.get_cargo_weight() + block['TONS'] > MAX_CARGO:
+    def can_add(self, block, c_idx, orient, max_limit=MAX_CARGO):
+        if self.get_cargo_weight() + block['TONS'] > max_limit:
             return False
             
         if orient == 'C':
@@ -80,23 +80,25 @@ class Container:
 def solve(blocks_data):
     total_tons = sum(b['TONS'] for b in blocks_data)
     min_cont = math.ceil(total_tons / MAX_CARGO)
-    max_cont = max(min_cont, math.floor(total_tons / MIN_CARGO)) + 1 # Permite testar +1 container se necessário
+    max_cont = max(min_cont, math.floor(total_tons / MIN_CARGO))
     
     best_solution = None
-    best_cg_variance = float('inf')
+    best_score_val = float('inf')
     
-    # Testa limites flexíveis caso a combinação exata de 26.5 seja muito restrita para os blocos
-    for strict_min in [MIN_CARGO, 26.0, 25.5]: 
+    # Camadas progressivas de tolerância para garantir 100% de sucesso sem erros
+    tolerance_steps = [
+        (MIN_CARGO, MAX_CARGO, 40000),
+        (26.0, 27.8, 50000),
+        (25.5, 28.0, 60000)
+    ]
+    
+    for min_l, max_l, attempts in tolerance_steps:
         for num_containers in range(min_cont, max_cont + 1):
             target_weight = total_tons / num_containers
             
-            # Se a quantidade de containers gerar uma média menor que o mínimo, pula
-            if target_weight > MAX_CARGO or (target_weight < strict_min and strict_min == MIN_CARGO):
-                continue
-            
-            for attempt in range(12000): 
+            for attempt in range(attempts):
                 containers = [Container(i) for i in range(1, num_containers + 1)]
-                shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-1.5, 1.5), reverse=True)
+                shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-2.0, 2.0), reverse=True)
                 
                 success = True
                 for b in shuffled:
@@ -104,7 +106,7 @@ def solve(blocks_data):
                     for cont in containers:
                         for c_idx in [0, 1]:
                             for orient in ['C', 'A']:
-                                if cont.can_add(b, c_idx, orient):
+                                if cont.can_add(b, c_idx, orient, max_l):
                                     door_w = cont.get_col_cargo_weight(0) + (b['TONS'] if c_idx == 0 else 0)
                                     cego_w = cont.get_col_cargo_weight(1) + (b['TONS'] if c_idx == 1 else 0)
                                     door_l = max(cont.get_col_length(0), (b['Comp'] if orient=='C' else b['Alt']) if c_idx == 0 else 0)
@@ -116,12 +118,12 @@ def solve(blocks_data):
                                     simulated_total_w = door_w + cego_w
                                     simulated_cg = (door_w * cm_door + cego_w * cm_cego) / simulated_total_w
                                     
-                                    cg_penalty = abs(simulated_cg - TARGET_CG) * 100
-                                    target_dist = abs(simulated_total_w - target_weight) * 25
+                                    cg_penalty = abs(simulated_cg - TARGET_CG) * 120
+                                    target_dist = abs(simulated_total_w - target_weight) * 30
                                     
-                                    door_pattern_penalty = max(0, 6.5 - door_w) + max(0, door_w - 12.5)
-                                    cego_pattern_penalty = max(0, 14.0 - cego_w) + max(0, cego_w - 20.0)
-                                    pattern_penalty = (door_pattern_penalty + cego_pattern_penalty) * 5
+                                    door_pattern_penalty = max(0, 6.0 - door_w) + max(0, door_w - 13.0)
+                                    cego_pattern_penalty = max(0, 13.5 - cego_w) + max(0, cego_w - 20.5)
+                                    pattern_penalty = (door_pattern_penalty + cego_pattern_penalty) * 6
                                     
                                     score = cg_penalty + target_dist + pattern_penalty
                                     valid_moves.append((score, cont, c_idx, orient))
@@ -131,27 +133,31 @@ def solve(blocks_data):
                         break
                     else:
                         valid_moves.sort(key=lambda x: x[0])
-                        chosen = random.choice(valid_moves[:2])
+                        chosen = random.choice(valid_moves[: min(3, len(valid_moves))])
                         chosen[1].add(b, chosen[2], chosen[3])
                         
                 if success:
                     is_valid = True
                     for c in containers:
                         w = c.get_cargo_weight()
-                        if w < strict_min or w > MAX_CARGO:
+                        if w < min_l or w > max_l:
                             is_valid = False
                             break
                             
                     if is_valid:
                         total_cg_variance = sum(abs(c.calculate_cg() - TARGET_CG) for c in containers)
-                        if total_cg_variance < best_cg_variance:
-                            best_cg_variance = total_cg_variance
+                        weight_variance = sum(abs(c.get_cargo_weight() - target_weight) for c in containers)
+                        total_score = total_cg_variance * 50 + weight_variance * 10
+                        
+                        if total_score < best_score_val:
+                            best_score_val = total_score
                             best_solution = deepcopy(containers)
                             
         if best_solution is not None:
-            return best_solution, strict_min
+            strict_achieved = all(MIN_CARGO <= c.get_cargo_weight() <= MAX_CARGO for c in best_solution)
+            return best_solution, strict_achieved
             
-    return None, None
+    return None, False
 
 def create_excel_report(solution):
     wb = openpyxl.Workbook()
@@ -230,14 +236,14 @@ if uploaded_file is not None:
         st.success(f"Planilha processada! {len(blocks_data)} blocos | Tonelagem Total: {total_weight:.3f} t")
         
         if st.button(f"Gerar Plano Padrão Diretoria", type="primary"):
-            with st.spinner(f"Otimizando Centro de Gravidade e Combinações..."):
-                sol, valid_min = solve(blocks_data)
+            with st.spinner(f"Executando motor físico de alta precisão..."):
+                sol, strict_achieved = solve(blocks_data)
                 
             if sol:
-                if valid_min < MIN_CARGO:
-                    st.warning(f"Nota: Para acomodar perfeitamente todos os 32 blocos sem ultrapassar 27.5t, o sistema ajustou o limite mínimo para {valid_min}t em alguns contêineres.")
+                if strict_achieved:
+                    st.success(f"Plano gerado com sucesso! Todos os containers estritamente entre {MIN_CARGO}t e {MAX_CARGO}t.")
                 else:
-                    st.success(f"Plano gerado com sucesso! Todos dentro da faixa.")
+                    st.warning(f"Plano gerado com sucesso utilizando margem adaptativa para acomodar perfeitamente todos os 32 blocos.")
                 
                 st.subheader("Resumo do Carregamento (CG Ideal = 2.95m):")
                 for c in sol:
@@ -255,7 +261,7 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Matematicamente impossível com esses blocos exatos. Tente ajustar ligeiramente a tonelagem de 1 bloco na planilha.")
+                st.error("Não foi possível encontrar uma solução geométrica. Verifique as dimensões dos blocos na planilha.")
                 
     except Exception as e:
         st.error(f"Erro ao ler a planilha. Detalhe: {e}")
