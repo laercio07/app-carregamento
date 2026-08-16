@@ -4,13 +4,14 @@ import numpy as np
 import random
 from copy import deepcopy
 import openpyxl
+import math
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 import io
 
 st.set_page_config(page_title="Gerador de Plano de Carregamento", page_icon="🚛")
 
 st.title("🚛 Gerador Automático de Carregamento")
-st.write("Faça o upload da planilha com os blocos e o sistema calculará a melhor distribuição nos containers priorizando o equilíbrio de içamento.")
+st.write("Faça o upload da planilha com os blocos e o sistema calculará automaticamente o número ideal de containers e a distribuição ideal entre **26,500 t** e **28,000 t** por unidade.")
 
 class Container:
     def __init__(self, id):
@@ -24,7 +25,6 @@ class Container:
         return sum(b['TONS'] for b in self.cols[c])
         
     def get_total_col_weight(self, c):
-        # c=0: Lado da porta (~1.19t estrutural) | c=1: Lado cego (~1.01t estrutural)
         structural_weight = 1.19 if c == 0 else 1.01
         return self.get_col_cargo_weight(c) + structural_weight
         
@@ -38,8 +38,8 @@ class Container:
         if not self.cols[c]: return 0.0
         return max(b['l_eff'] for b in self.cols[c])
         
-    def can_add(self, block, c_idx, orient):
-        if self.get_cargo_weight() + block['TONS'] > 25.3:
+    def can_add(self, block, c_idx, orient, max_cargo=28.0):
+        if self.get_cargo_weight() + block['TONS'] > max_cargo:
             return False
             
         if orient == 'C':
@@ -66,12 +66,13 @@ class Container:
         self.cols[c_idx].append(b)
 
 def solve(blocks_data):
-    best_solution = None
-    best_score = float('inf')
+    total_tons = sum(b['TONS'] for b in blocks_data)
+    # Calcula o número ideal de containers com base na média desejada de 27.25t
+    num_containers = max(1, math.ceil(total_tons / 27.25))
     
-    for attempt in range(10000):
-        containers = [Container(i) for i in range(1, 7)]
-        shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-2, 2), reverse=True)
+    for attempt in range(8000):
+        containers = [Container(i) for i in range(1, num_containers + 1)]
+        shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-1, 1), reverse=True)
         
         success = True
         for b in shuffled:
@@ -79,39 +80,45 @@ def solve(blocks_data):
             for cont in containers:
                 for c_idx in [0, 1]:
                     for orient in ['C', 'A']:
-                        if cont.can_add(b, c_idx, orient):
+                        if cont.can_add(b, c_idx, orient, max_cargo=28.0):
                             t0 = cont.get_total_col_weight(0) + (b['TONS'] if c_idx == 0 else 0)
                             t1 = cont.get_total_col_weight(1) + (b['TONS'] if c_idx == 1 else 0)
                             
-                            balance_penalty = abs(t0 - t1) * 15
-                            weight_penalty = cont.get_cargo_weight()
+                            balance_penalty = abs(t0 - t1) * 10
+                            # Penalidade para guiar o peso da carga o mais próximo possível de 27.25t
+                            target_weight_penalty = abs(cont.get_cargo_weight() + b['TONS'] - 27.25) * 6
                             new_len = max(cont.get_col_length(c_idx), (b['Comp'] if orient=='C' else b['Alt']))
                             len_penalty = new_len - cont.get_col_length(c_idx)
                             
-                            score = weight_penalty * 2 + balance_penalty + len_penalty * 5
+                            score = target_weight_penalty + balance_penalty + len_penalty * 2
                             valid_moves.append((score, cont, c_idx, orient))
             
             if not valid_moves:
                 success = False
                 break
+            else:
+                valid_moves.sort(key=lambda x: x[0])
+                chosen = random.choice(valid_moves[:min(len(valid_moves), 3)])
+                chosen[1].add(b, chosen[2], chosen[3])
                 
-            valid_moves.sort(key=lambda x: x[0])
-            chosen = random.choice(valid_moves[:3])
-            chosen[1].add(b, chosen[2], chosen[3])
-            
         if success:
-            total_imbalance = sum(abs(c.get_total_col_weight(0) - c.get_total_col_weight(1)) for c in containers)
-            if total_imbalance < best_score:
-                best_score = total_imbalance
-                best_solution = deepcopy(containers)
+            # Verifica se os containers atingiram o mínimo de 26.5t (permitindo flexibilidade apenas no último se necessário)
+            valid_weights = True
+            for i, c in enumerate(containers):
+                w = c.get_cargo_weight()
+                if i < len(containers) - 1 and w < 26.5:
+                    valid_weights = False
+                    break
+            if valid_weights:
+                return containers
                 
-    return best_solution
+    return None
 
 def create_excel_report(solution):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Plano de Carregamento"
-    colors = ['FFFF00', '00B0F0', '00FF00', 'FF9900', 'CCC0DA', 'FF0000']
+    colors = ['FFFF00', '00B0F0', '00FF00', 'FF9900', 'CCC0DA', 'FF0000', 'E2EFDA', 'FCE4D6']
     thick_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     
     row_offset = 2
@@ -165,8 +172,6 @@ def create_excel_report(solution):
         ws.cell(row=row_offset, column=4, value=round(door_len + blind_len, 2)).alignment = Alignment(horizontal='center')
         row_offset += 1
         
-        door_w = sum([b['TONS'] for b in door_col])
-        blind_w = sum([b['TONS'] for b in blind_col])
         total_door_w = cont.get_total_col_weight(0)
         total_blind_w = cont.get_total_col_weight(1)
         
@@ -192,27 +197,28 @@ if uploaded_file is not None:
         df_blocks = df_blocks.dropna(subset=['Bloco', 'TONS'])
         blocks_data = df_blocks.to_dict('records')
         
-        st.success(f"Planilha carregada! {len(blocks_data)} blocos encontrados.")
+        total_weight = sum(b['TONS'] for b in blocks_data)
+        st.success(f"Planilha carregada! {len(blocks_data)} blocos encontrados | Tonelagem Total: {total_weight:.3f} t")
         
-        if st.button("Gerar Plano de Carregamento", type="primary"):
-            with st.spinner("Calculando a melhor distribuição equilibrada..."):
+        if st.button("Gerar Plano de Carregamento Otimizado", type="primary"):
+            with st.spinner("Calculando número ideal de containers e distribuição ideal..."):
                 sol = solve(blocks_data)
                 
             if sol:
-                st.success("Plano gerado com sucesso!")
-                st.subheader("Resumo do Carregamento:")
+                st.success(f"Plano gerado com sucesso! Total de {len(sol)} containers utilizados.")
+                st.subheader("Resumo do Carregamento por Container:")
                 for c in sol:
-                    st.write(f"**Container {c.id}:** Peso Total {c.get_total_weight():.3f} ton | Porta: {c.get_total_col_weight(0):.3f}t | Cego: {c.get_total_col_weight(1):.3f}t")
+                    st.write(f"**Container {c.id}:** Carga: {c.get_cargo_weight():.3f} t (Média alvo: 27,25 t) | Porta: {c.get_total_col_weight(0):.3f} t | Cego: {c.get_total_col_weight(1):.3f} t")
                 
                 excel_data = create_excel_report(sol)
                 st.download_button(
-                    label="📥 Baixar Excel do Plano (Para o Pátio)",
+                    label="📥 Baixar Excel do Plano Otimizado (Para o Pátio)",
                     data=excel_data,
-                    file_name="Plano_Alocacao_Equilibrado.xlsx",
+                    file_name="Plano_Carregamento_Otimizado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Não foi possível encontrar uma combinação.")
+                st.error("Não foi possível encontrar uma combinação dentro da faixa estrita. Tente ajustar os limites se necessário.")
                 
     except Exception as e:
         st.error(f"Erro ao ler a planilha. Detalhe: {e}")
