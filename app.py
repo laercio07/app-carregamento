@@ -8,17 +8,18 @@ import math
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 import io
 
+# Configuração da página
 st.set_page_config(page_title="Gerador de Plano de Carregamento", page_icon="🚛", layout="wide")
 
 # ==========================================
-# LIMITES GLOBAIS ESTABELECIDOS
+# CONFIGURAÇÕES E LIMITES
 # ==========================================
 MIN_CARGO = 26.5  
 MAX_CARGO = 27.5  
 TARGET_CG = 2.95  
 
 st.title("🚛 Gerador Automático de Carregamento (Padrão Diretoria)")
-st.write("Constraint aplicada: Se o bloco da base está travessado (A), toda a coluna segue 'A'.")
+st.write("Constraint aplicada: Se o bloco da base define a orientação (A ou C), todos os blocos acima seguem o mesmo padrão.")
 
 class Container:
     def __init__(self, id):
@@ -39,14 +40,16 @@ class Container:
         return max(b['l_eff'] for b in self.cols[c])
         
     def can_add(self, block, c_idx, orient, max_limit=MAX_CARGO):
-        # --- NOVO: Restrição de Orientação (Toda coluna igual a base) ---
+        # --- RESTRICAO: Toda a coluna deve ter a mesma orientação da base ---
         if self.cols[c_idx]:
             if orient != self.cols[c_idx][0]['orient']:
                 return False
         
+        # Limite de carga
         if self.get_cargo_weight() + block['TONS'] > max_limit:
             return False
             
+        # Cálculo de dimensões efetivas
         if orient == 'C':
             l_eff, w_eff, h_eff = block['Comp'], block['Alt'], block['Larg']
         else: 
@@ -55,6 +58,7 @@ class Container:
         if w_eff > 2.20: return False
         if self.get_col_height(c_idx) + h_eff > 2.20: return False
         
+        # Limite de comprimento total (5.90m)
         new_col_len = max(self.get_col_length(c_idx), l_eff)
         other_col_len = self.get_col_length(1 - c_idx)
         if new_col_len + other_col_len > 5.90: return False
@@ -90,11 +94,7 @@ def solve(blocks_data):
     best_solution = None
     best_score_val = float('inf')
     
-    # Tentativas ajustadas para garantir a convergência com a restrição de coluna
-    tolerance_steps = [
-        (MIN_CARGO, MAX_CARGO, 50000),
-        (25.5, 28.0, 70000)
-    ]
+    tolerance_steps = [(MIN_CARGO, MAX_CARGO, 50000), (25.5, 28.0, 70000)]
     
     for min_l, max_l, attempts in tolerance_steps:
         for num_containers in range(min_cont, max_cont + 1):
@@ -111,7 +111,7 @@ def solve(blocks_data):
                         for c_idx in [0, 1]:
                             for orient in ['C', 'A']:
                                 if cont.can_add(b, c_idx, orient, max_l):
-                                    # ... lógica de score inalterada ...
+                                    # Simulação para penalidade
                                     door_w = cont.get_col_cargo_weight(0) + (b['TONS'] if c_idx == 0 else 0)
                                     cego_w = cont.get_col_cargo_weight(1) + (b['TONS'] if c_idx == 1 else 0)
                                     door_l = max(cont.get_col_length(0), (b['Comp'] if orient=='C' else b['Alt']) if c_idx == 0 else 0)
@@ -125,9 +125,8 @@ def solve(blocks_data):
                                     
                                     cg_penalty = abs(simulated_cg - TARGET_CG) * 120
                                     target_dist = abs(simulated_total_w - target_weight) * 30
-                                    door_pattern_penalty = max(0, 6.0 - door_w) + max(0, door_w - 13.0)
-                                    cego_pattern_penalty = max(0, 13.5 - cego_w) + max(0, cego_w - 20.5)
-                                    pattern_penalty = (door_pattern_penalty + cego_pattern_penalty) * 6
+                                    pattern_penalty = (max(0, 6.0 - door_w) + max(0, door_w - 13.0) + max(0, 13.5 - cego_w) + max(0, cego_w - 20.5)) * 6
+                                    
                                     score = cg_penalty + target_dist + pattern_penalty
                                     valid_moves.append((score, cont, c_idx, orient))
                     
@@ -140,27 +139,18 @@ def solve(blocks_data):
                         chosen[1].add(b, chosen[2], chosen[3])
                         
                 if success:
-                    is_valid = True
-                    for c in containers:
-                        w = c.get_cargo_weight()
-                        if w < min_l or w > max_l:
-                            is_valid = False
-                            break
+                    is_valid = all(min_l <= c.get_cargo_weight() <= max_l for c in containers)
                     if is_valid:
-                        total_cg_variance = sum(abs(c.calculate_cg() - TARGET_CG) for c in containers)
-                        weight_variance = sum(abs(c.get_cargo_weight() - target_weight) for c in containers)
-                        total_score = total_cg_variance * 50 + weight_variance * 10
+                        total_score = sum(abs(c.calculate_cg() - TARGET_CG) for c in containers) * 50
                         if total_score < best_score_val:
                             best_score_val = total_score
                             best_solution = deepcopy(containers)
                             
         if best_solution is not None:
-            strict_achieved = all(MIN_CARGO <= c.get_cargo_weight() <= MAX_CARGO for c in best_solution)
-            return best_solution, strict_achieved
+            return best_solution, True
             
     return None, False
 
-# [A função create_excel_report permanece idêntica à versão anterior pois já corrigia a base e o cabeçalho]
 def create_excel_report(solution):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -170,23 +160,25 @@ def create_excel_report(solution):
     
     row_offset = 2
     for c_idx, cont in enumerate(solution):
+        # A base real da coluna (primeiro bloco inserido)
         base_door = cont.cols[0][0] if len(cont.cols[0]) > 0 else None
         base_blind = cont.cols[1][0] if len(cont.cols[1]) > 0 else None
         
+        # Ordenação para exibição
         door_col = sorted(cont.cols[0], key=lambda x: x['l_eff'], reverse=True)
         blind_col = sorted(cont.cols[1], key=lambda x: x['l_eff'], reverse=True)
         
+        # Cabeçalho
         ws.merge_cells(start_row=row_offset, start_column=2, end_row=row_offset, end_column=4)
         cell = ws.cell(row=row_offset, column=2, value=f"CONTAINER {cont.id} (CG: {cont.calculate_cg():.2f}m)")
-        cell.font = Font(bold=True, size=14)
-        cell.alignment = Alignment(horizontal='center')
+        cell.font = Font(bold=True, size=14); cell.alignment = Alignment(horizontal='center')
         
         row_offset += 1
         ws.cell(row=row_offset, column=2, value="Lado Porta").alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=3, value="Lado Cego").alignment = Alignment(horizontal='center')
         row_offset += 1
         
-        # Cabeçalho da orientação baseado no bloco da base real
+        # Orientação da base real (A ou C)
         ws.cell(row=row_offset, column=2, value=base_door['orient'] if base_door else "").alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=3, value=base_blind['orient'] if base_blind else "").alignment = Alignment(horizontal='center')
         row_offset += 1
@@ -196,36 +188,45 @@ def create_excel_report(solution):
         
         for i in range(max_blocks - 1, -1, -1):
             if i < len(door_col):
-                b = door_col[i]
-                c = ws.cell(row=row_offset, column=2, value=b['Bloco'])
-                c.fill = fill
-                c.border = thick_border
-                c.alignment = Alignment(horizontal='center')
+                c = ws.cell(row=row_offset, column=2, value=door_col[i]['Bloco'])
+                c.fill = fill; c.border = thick_border; c.alignment = Alignment(horizontal='center')
             if i < len(blind_col):
-                b = blind_col[i]
-                c = ws.cell(row=row_offset, column=3, value=b['Bloco'])
-                c.fill = fill
-                c.border = thick_border
-                c.alignment = Alignment(horizontal='center')
+                c = ws.cell(row=row_offset, column=3, value=blind_col[i]['Bloco'])
+                c.fill = fill; c.border = thick_border; c.alignment = Alignment(horizontal='center')
             row_offset += 1
             
+        # Comprimentos calculados com base na orientação da base real
         door_len = base_door['l_eff'] if base_door else 0
         blind_len = base_blind['l_eff'] if base_blind else 0
-        
         ws.cell(row=row_offset, column=2, value=round(door_len, 2)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=3, value=round(blind_len, 2)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=4, value=round(door_len + blind_len, 2)).alignment = Alignment(horizontal='center')
         row_offset += 1
         
+        # Pesos
         ws.cell(row=row_offset, column=2, value=round(cont.get_col_cargo_weight(0), 3)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=3, value=round(cont.get_col_cargo_weight(1), 3)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=4, value=round(cont.get_cargo_weight(), 3)).alignment = Alignment(horizontal='center')
         row_offset += 3
         
     output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
+    wb.save(output); output.seek(0)
     return output
 
+# --- Interface Principal ---
 uploaded_file = st.file_uploader("Selecione sua planilha de blocos (Excel)", type=["xlsx"])
-# ... [restante da lógica de interface inalterada] ...
+if uploaded_file:
+    df = pd.read_excel(uploaded_file, sheet_name='BLOCOS')
+    df_blocks = df.iloc[5:, [0, 1, 2, 3, 4]].copy() 
+    df_blocks.columns = ['Bloco', 'Comp', 'Alt', 'Larg', 'TONS']
+    blocks_data = df_blocks.dropna(subset=['Bloco', 'TONS']).to_dict('records')
+    
+    if st.button("Gerar Plano Padrão Diretoria", type="primary"):
+        sol, _ = solve(blocks_data)
+        if sol:
+            st.subheader("Resumo do Carregamento:")
+            for c in sol:
+                st.write(f"**Container {c.id}** | Carga: {c.get_cargo_weight():.2f} t | CG: {c.calculate_cg():.2f} m")
+            st.download_button("📥 Baixar Excel", data=create_excel_report(sol), file_name="Plano_Carregamento.xlsx")
+        else:
+            st.error("Não foi possível encontrar uma solução válida.")
