@@ -10,7 +10,7 @@ import io
 st.set_page_config(page_title="Gerador de Plano de Carregamento", page_icon="🚛")
 
 st.title("🚛 Gerador Automático de Carregamento")
-st.write("Faça o upload da planilha com os blocos e o sistema calculará a melhor distribuição nos containers considerando o peso estrutural e o equilíbrio de içamento.")
+st.write("Faça o upload da planilha com os blocos e o sistema calculará a melhor distribuição nos containers priorizando o equilíbrio de içamento.")
 
 class Container:
     def __init__(self, id):
@@ -29,7 +29,7 @@ class Container:
         return self.get_col_cargo_weight(c) + structural_weight
         
     def get_total_weight(self):
-        return self.get_cargo_weight() + 2.20  # 2.2t peso total vazio do container
+        return self.get_cargo_weight() + 2.20
         
     def get_col_height(self, c):
         return sum(b['h_eff'] for b in self.cols[c])
@@ -39,7 +39,7 @@ class Container:
         return max(b['l_eff'] for b in self.cols[c])
         
     def can_add(self, block, c_idx, orient):
-        if self.get_cargo_weight() + block['TONS'] > 25.3:  # Limite de carga útil (~27.3t total - 2.2t tara)
+        if self.get_cargo_weight() + block['TONS'] > 25.3:
             return False
             
         if orient == 'C':
@@ -69,9 +69,9 @@ def solve(blocks_data):
     best_solution = None
     best_score = float('inf')
     
-    for attempt in range(8000):
+    for attempt in range(10000):
         containers = [Container(i) for i in range(1, 7)]
-        shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-1, 1), reverse=True)
+        shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-2, 2), reverse=True)
         
         success = True
         for b in shuffled:
@@ -80,16 +80,15 @@ def solve(blocks_data):
                 for c_idx in [0, 1]:
                     for orient in ['C', 'A']:
                         if cont.can_add(b, c_idx, orient):
-                            # Penalidade de peso total e desequilíbrio entre o lado da porta (0) e o lado cego (1)
                             t0 = cont.get_total_col_weight(0) + (b['TONS'] if c_idx == 0 else 0)
-                            t1 = cont.get_total_col_weight(1) + (b['TONS'] if c_idx == 1 else 1)
-                            balance_penalty = abs(t0 - t1) * 50  # Forte penalidade para evitar desnível no guindaste
+                            t1 = cont.get_total_col_weight(1) + (b['TONS'] if c_idx == 1 else 0)
                             
+                            balance_penalty = abs(t0 - t1) * 15
                             weight_penalty = cont.get_cargo_weight()
                             new_len = max(cont.get_col_length(c_idx), (b['Comp'] if orient=='C' else b['Alt']))
                             len_penalty = new_len - cont.get_col_length(c_idx)
                             
-                            score = weight_penalty * 5 + balance_penalty + len_penalty
+                            score = weight_penalty * 2 + balance_penalty + len_penalty * 5
                             valid_moves.append((score, cont, c_idx, orient))
             
             if not valid_moves:
@@ -101,10 +100,9 @@ def solve(blocks_data):
             chosen[1].add(b, chosen[2], chosen[3])
             
         if success:
-            # Verifica se o desequilíbrio estrutural total em cada container é seguro
-            max_imbalance = max(abs(c.get_total_col_weight(0) - c.get_total_col_weight(1)) for c in containers)
-            if max_imbalance < best_score:
-                best_score = max_imbalance
+            total_imbalance = sum(abs(c.get_total_col_weight(0) - c.get_total_col_weight(1)) for c in containers)
+            if total_imbalance < best_score:
+                best_score = total_imbalance
                 best_solution = deepcopy(containers)
                 
     return best_solution
@@ -118,7 +116,6 @@ def create_excel_report(solution):
     
     row_offset = 2
     for c_idx, cont in enumerate(solution):
-        # Coluna 0: Lado da Porta (Traseira) | Coluna 1: Lado Cego (Dianteira)
         door_col = sorted(cont.cols[0], key=lambda x: x['l_eff'], reverse=True)
         blind_col = sorted(cont.cols[1], key=lambda x: x['l_eff'], reverse=True)
         
@@ -168,7 +165,6 @@ def create_excel_report(solution):
         ws.cell(row=row_offset, column=4, value=round(door_len + blind_len, 2)).alignment = Alignment(horizontal='center')
         row_offset += 1
         
-        # Pesos de Carga e Pesos Totais (com tara estrutural)
         door_w = sum([b['TONS'] for b in door_col])
         blind_w = sum([b['TONS'] for b in blind_col])
         total_door_w = cont.get_total_col_weight(0)
@@ -199,12 +195,12 @@ if uploaded_file is not None:
         st.success(f"Planilha carregada! {len(blocks_data)} blocos encontrados.")
         
         if st.button("Gerar Plano de Carregamento", type="primary"):
-            with st.spinner("Calculando distribuição equilibrada para içamento..."):
+            with st.spinner("Calculando a melhor distribuição equilibrada..."):
                 sol = solve(blocks_data)
                 
             if sol:
                 st.success("Plano gerado com sucesso!")
-                st.subheader("Resumo do Carregamento (Equilibrado para Guindaste):")
+                st.subheader("Resumo do Carregamento:")
                 for c in sol:
                     st.write(f"**Container {c.id}:** Peso Total {c.get_total_weight():.3f} ton | Porta: {c.get_total_col_weight(0):.3f}t | Cego: {c.get_total_col_weight(1):.3f}t")
                 
@@ -216,7 +212,7 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Não foi possível encontrar uma combinação dentro dos limites estritos de equilíbrio.")
+                st.error("Não foi possível encontrar uma combinação.")
                 
     except Exception as e:
         st.error(f"Erro ao ler a planilha. Detalhe: {e}")
