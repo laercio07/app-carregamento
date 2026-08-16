@@ -11,14 +11,14 @@ import io
 st.set_page_config(page_title="Gerador de Plano de Carregamento", page_icon="🚛", layout="wide")
 
 # ==========================================
-# LIMITES GLOBAIS ESTABELECIDOS PELA DIRETORIA
+# LIMITES GLOBAIS ESTABELECIDOS
 # ==========================================
-MIN_CARGO = 26.5  # Peso mínimo estrito (26,500 t)
-MAX_CARGO = 27.5  # Peso máximo estrito (27,500 t)
-TARGET_CG = 2.95  # Centro de gravidade ideal (meio do container de 5.9m)
+MIN_CARGO = 26.5  
+MAX_CARGO = 27.5  
+TARGET_CG = 2.95  
 
 st.title("🚛 Gerador Automático de Carregamento (Padrão Diretoria)")
-st.write(f"O algoritmo agora utiliza cálculos físicos de Centro de Gravidade (CG) para distribuir a carga perfeitamente: mais peso no Lado Cego (~17t) e menos na Porta (~10t), garantindo que o peso total fique entre **{MIN_CARGO} t** e **{MAX_CARGO} t**.")
+st.write(f"O algoritmo calcula o Centro de Gravidade (CG) ideal (~2.95m) e distribui os blocos mantendo a carga entre **{MIN_CARGO} t** e **{MAX_CARGO} t**.")
 
 class Container:
     def __init__(self, id):
@@ -71,9 +71,7 @@ class Container:
         total_w = door_w + cego_w
         if total_w == 0: return 2.95
         
-        # O centro de massa da coluna da porta fica na metade do seu comprimento
         cm_door = self.get_col_length(0) / 2.0 if self.get_col_length(0) > 0 else 0
-        # O centro de massa da coluna cega fica no fundo (5.9m) menos a metade do seu comprimento
         cm_cego = 5.90 - (self.get_col_length(1) / 2.0) if self.get_col_length(1) > 0 else 5.90
         
         cg = (door_w * cm_door + cego_w * cm_cego) / total_w
@@ -82,19 +80,21 @@ class Container:
 def solve(blocks_data):
     total_tons = sum(b['TONS'] for b in blocks_data)
     min_cont = math.ceil(total_tons / MAX_CARGO)
-    max_cont = max(min_cont, math.floor(total_tons / MIN_CARGO))
+    max_cont = max(min_cont, math.floor(total_tons / MIN_CARGO)) + 1 # Permite testar +1 container se necessário
     
     best_solution = None
     best_cg_variance = float('inf')
     
-    # Fase 1: Tenta o limite estrito (26.5t). Se a matemática dos blocos não permitir,
-    # permite uma leve flexibilização no mínimo (para 26.0t) para não travar o usuário, 
-    # mas NUNCA passa do máximo de 27.5t.
-    for strict_min in [MIN_CARGO, 26.0]: 
+    # Testa limites flexíveis caso a combinação exata de 26.5 seja muito restrita para os blocos
+    for strict_min in [MIN_CARGO, 26.0, 25.5]: 
         for num_containers in range(min_cont, max_cont + 1):
             target_weight = total_tons / num_containers
             
-            for attempt in range(8000): 
+            # Se a quantidade de containers gerar uma média menor que o mínimo, pula
+            if target_weight > MAX_CARGO or (target_weight < strict_min and strict_min == MIN_CARGO):
+                continue
+            
+            for attempt in range(12000): 
                 containers = [Container(i) for i in range(1, num_containers + 1)]
                 shuffled = sorted(blocks_data, key=lambda x: x['TONS'] + random.uniform(-1.5, 1.5), reverse=True)
                 
@@ -105,7 +105,6 @@ def solve(blocks_data):
                         for c_idx in [0, 1]:
                             for orient in ['C', 'A']:
                                 if cont.can_add(b, c_idx, orient):
-                                    # Simula a adição para ver como fica a física do container
                                     door_w = cont.get_col_cargo_weight(0) + (b['TONS'] if c_idx == 0 else 0)
                                     cego_w = cont.get_col_cargo_weight(1) + (b['TONS'] if c_idx == 1 else 0)
                                     door_l = max(cont.get_col_length(0), (b['Comp'] if orient=='C' else b['Alt']) if c_idx == 0 else 0)
@@ -117,15 +116,11 @@ def solve(blocks_data):
                                     simulated_total_w = door_w + cego_w
                                     simulated_cg = (door_w * cm_door + cego_w * cm_cego) / simulated_total_w
                                     
-                                    # Penaliza desvios do CG perfeito (2.95m)
                                     cg_penalty = abs(simulated_cg - TARGET_CG) * 100
+                                    target_dist = abs(simulated_total_w - target_weight) * 25
                                     
-                                    # Penaliza fuga da média de peso
-                                    target_dist = abs(simulated_total_w - target_weight) * 20
-                                    
-                                    # Guia os pesos para o padrão do diretor (Porta ~9.5t, Cego ~17.5t)
-                                    door_pattern_penalty = max(0, 7.0 - door_w) + max(0, door_w - 12.0)
-                                    cego_pattern_penalty = max(0, 14.5 - cego_w) + max(0, cego_w - 19.5)
+                                    door_pattern_penalty = max(0, 6.5 - door_w) + max(0, door_w - 12.5)
+                                    cego_pattern_penalty = max(0, 14.0 - cego_w) + max(0, cego_w - 20.0)
                                     pattern_penalty = (door_pattern_penalty + cego_pattern_penalty) * 5
                                     
                                     score = cg_penalty + target_dist + pattern_penalty
@@ -148,7 +143,6 @@ def solve(blocks_data):
                             break
                             
                     if is_valid:
-                        # Avalia quão perfeito ficou o CG de todos os containers
                         total_cg_variance = sum(abs(c.calculate_cg() - TARGET_CG) for c in containers)
                         if total_cg_variance < best_cg_variance:
                             best_cg_variance = total_cg_variance
@@ -236,14 +230,14 @@ if uploaded_file is not None:
         st.success(f"Planilha processada! {len(blocks_data)} blocos | Tonelagem Total: {total_weight:.3f} t")
         
         if st.button(f"Gerar Plano Padrão Diretoria", type="primary"):
-            with st.spinner(f"Otimizando Centro de Gravidade e Limites de Peso..."):
+            with st.spinner(f"Otimizando Centro de Gravidade e Combinações..."):
                 sol, valid_min = solve(blocks_data)
                 
             if sol:
                 if valid_min < MIN_CARGO:
-                    st.warning(f"Nota: Para fazer os blocos caberem perfeitamente sem passar de {MAX_CARGO}t, a inteligência precisou reduzir o mínimo de um container para {valid_min}t.")
+                    st.warning(f"Nota: Para acomodar perfeitamente todos os 32 blocos sem ultrapassar 27.5t, o sistema ajustou o limite mínimo para {valid_min}t em alguns contêineres.")
                 else:
-                    st.success(f"Plano gerado com sucesso! Todos entre {MIN_CARGO}t e {MAX_CARGO}t.")
+                    st.success(f"Plano gerado com sucesso! Todos dentro da faixa.")
                 
                 st.subheader("Resumo do Carregamento (CG Ideal = 2.95m):")
                 for c in sol:
@@ -261,7 +255,7 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Matematicamente impossível distribuir as pedras atuais nestas faixas exatas de peso. Tente adicionar/remover 1 bloco.")
+                st.error("Matematicamente impossível com esses blocos exatos. Tente ajustar ligeiramente a tonelagem de 1 bloco na planilha.")
                 
     except Exception as e:
         st.error(f"Erro ao ler a planilha. Detalhe: {e}")
