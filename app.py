@@ -17,7 +17,7 @@ MIN_CARGO = 26.5
 MAX_CARGO = 27.5  
 TARGET_CG = 2.95  
 
-st.title("🚛 Gerador Automático de Carregamento (Padrão Diretoria)")
+st.title("🚛 Gerador Automático de Carregamento")
 st.write(f"O algoritmo calcula o Centro de Gravidade (CG) ideal (~2.95m) e distribui os blocos mantendo a carga entre **{MIN_CARGO} t** e **{MAX_CARGO} t**.")
 
 class Container:
