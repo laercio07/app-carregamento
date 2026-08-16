@@ -85,7 +85,6 @@ def solve(blocks_data):
     best_solution = None
     best_score_val = float('inf')
     
-    # Camadas progressivas de tolerância para garantir 100% de sucesso sem erros
     tolerance_steps = [
         (MIN_CARGO, MAX_CARGO, 40000),
         (26.0, 27.8, 50000),
@@ -168,6 +167,10 @@ def create_excel_report(solution):
     
     row_offset = 2
     for c_idx, cont in enumerate(solution):
+        # Captura os blocos da base ANTES da ordenação para o relatório
+        base_door = cont.cols[0][0] if len(cont.cols[0]) > 0 else None
+        base_blind = cont.cols[1][0] if len(cont.cols[1]) > 0 else None
+        
         door_col = sorted(cont.cols[0], key=lambda x: x['l_eff'], reverse=True)
         blind_col = sorted(cont.cols[1], key=lambda x: x['l_eff'], reverse=True)
         
@@ -203,8 +206,10 @@ def create_excel_report(solution):
                 c.alignment = Alignment(horizontal='center')
             row_offset += 1
             
-        door_len = max([b['l_eff'] for b in door_col]) if door_col else 0
-        blind_len = max([b['l_eff'] for b in blind_col]) if blind_col else 0
+        # CORREÇÃO APLICADA: Comprimento é o comprimento efetivo do bloco da base de cada coluna
+        door_len = base_door['l_eff'] if base_door else 0
+        blind_len = base_blind['l_eff'] if base_blind else 0
+        
         ws.cell(row=row_offset, column=2, value=round(door_len, 2)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=3, value=round(blind_len, 2)).alignment = Alignment(horizontal='center')
         ws.cell(row=row_offset, column=4, value=round(door_len + blind_len, 2)).alignment = Alignment(horizontal='center')
@@ -243,7 +248,7 @@ if uploaded_file is not None:
                 if strict_achieved:
                     st.success(f"Plano gerado com sucesso! Todos os containers estritamente entre {MIN_CARGO}t e {MAX_CARGO}t.")
                 else:
-                    st.warning(f"Plano gerado com sucesso utilizando margem adaptativa para acomodar perfeitamente todos os 32 blocos.")
+                    st.warning(f"Plano gerado com sucesso utilizando margem adaptativa para acomodar perfeitamente todos os blocos.")
                 
                 st.subheader("Resumo do Carregamento (CG Ideal = 2.95m):")
                 for c in sol:
